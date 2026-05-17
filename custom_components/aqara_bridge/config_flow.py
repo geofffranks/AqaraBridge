@@ -9,6 +9,7 @@ from homeassistant.config_entries import (
     ConfigEntry,
 )
 from homeassistant.core import callback
+from homeassistant.helpers import selector
 
 from . import init_hass_data, data_masking, gen_auth_entry
 from .core.const import *
@@ -16,6 +17,10 @@ from .core.const import *
 _LOGGER = logging.getLogger(__name__)
 
 DEVICE_GET_TOKEN_CONFIG = vol.Schema({vol.Required(CONF_FIELD_AUTH_CODE): str})
+
+PASSWORD_SELECTOR = selector.TextSelector(
+    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+)
 
 
 class AqaraBridgeFlowHandler(ConfigFlow, domain=DOMAIN):
@@ -48,6 +53,46 @@ class AqaraBridgeFlowHandler(ConfigFlow, domain=DOMAIN):
         self._session = self.hass.data[DOMAIN][HASS_DATA_AIOTCLOUD]
         return await self.async_step_get_auth_code()
 
+    async def async_step_reauth(self, entry_data):
+        """Handle re-authentication when the saved tokens are no longer valid."""
+        init_hass_data(self.hass)
+        self._device_manager = self.hass.data[DOMAIN][HASS_DATA_AIOT_MANAGER]
+        self._session = self.hass.data[DOMAIN][HASS_DATA_AIOTCLOUD]
+        self.account = entry_data.get(CONF_ENTRY_AUTH_ACCOUNT)
+        self.country_code = entry_data.get(CONF_ENTRY_AUTH_COUNTRY_CODE)
+        self.app_id = entry_data.get(CONF_ENTRY_APP_ID)
+        self.app_key = entry_data.get(CONF_ENTRY_APP_KEY)
+        self.key_id = entry_data.get(CONF_ENTRY_KEY_ID)
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input=None):
+        """Delegate to the standard auth-code form; pre-fill via instance attrs."""
+        return await self.async_step_get_auth_code(user_input=user_input)
+
+    def _is_reauth(self) -> bool:
+        return self.source == "reauth"
+
+    def _finalize_auth(self, auth_entry: dict):
+        """Update existing entry on reauth; otherwise create a new one (initial flow)."""
+        if self._is_reauth():
+            existing = self.hass.config_entries.async_get_entry(
+                self.context["entry_id"]
+            )
+            if existing is not None:
+                self.hass.config_entries.async_update_entry(
+                    existing, data=auth_entry
+                )
+                self.hass.async_create_task(
+                    self.hass.config_entries.async_reload(existing.entry_id)
+                )
+                return self.async_abort(reason="reauth_successful")
+        self.hass.async_create_task(
+            self.hass.config_entries.flow.async_init(
+                DOMAIN, context={"source": "get_token"}, data=auth_entry
+            )
+        )
+        return self.async_abort(reason="complete")
+
     async def async_step_get_auth_code(self, user_input=None):
         """Configure an aqara device through the Aqara Cloud."""
         errors = {}
@@ -76,12 +121,7 @@ class AqaraBridgeFlowHandler(ConfigFlow, domain=DOMAIN):
                         self.country_code,
                         resp["result"],
                     )
-                    self.hass.async_create_task(
-                        self.hass.config_entries.flow.async_init(
-                            DOMAIN, context={"source": "get_token"}, data=auth_entry
-                        )
-                    )
-                    return self.async_abort(reason="complete")
+                    return self._finalize_auth(auth_entry)
                 else:
                     errors["base"] = "refresh_token_error"
             else:
@@ -93,27 +133,27 @@ class AqaraBridgeFlowHandler(ConfigFlow, domain=DOMAIN):
         def_account = (
             user_input.get(CONF_FIELD_ACCOUNT)
             if user_input and user_input.get(CONF_FIELD_ACCOUNT)
-            else ""
+            else (self.account or "")
         )
         def_country_code = (
             user_input.get(CONF_FIELD_COUNTRY_CODE)
             if user_input and user_input.get(CONF_FIELD_COUNTRY_CODE)
-            else SERVER_COUNTRY_CODES_DEFAULT
+            else (self.country_code or SERVER_COUNTRY_CODES_DEFAULT)
         )
         def_app_id = (
             user_input.get(CONF_FIELD_APP_ID)
             if user_input and user_input.get(CONF_FIELD_APP_ID)
-            else DEFAULT_CLOUD_APP_ID
+            else (self.app_id or DEFAULT_CLOUD_APP_ID)
         )
         def_app_key = (
             user_input.get(CONF_FIELD_APP_KEY)
             if user_input and user_input.get(CONF_FIELD_APP_KEY)
-            else DEFAULT_CLOUD_APP_KEY
+            else (self.app_key or DEFAULT_CLOUD_APP_KEY)
         )
         def_key_id = (
             user_input.get(CONF_FIELD_KEY_ID)
             if user_input and user_input.get(CONF_FIELD_KEY_ID)
-            else DEFAULT_CLOUD_KEY_ID
+            else (self.key_id or DEFAULT_CLOUD_KEY_ID)
         )
 
         config_scheme = vol.Schema(
@@ -125,7 +165,7 @@ class AqaraBridgeFlowHandler(ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_FIELD_APP_ID, default=def_app_id): str,
                 vol.Required(CONF_FIELD_APP_KEY, default=def_app_key): str,
                 vol.Required(CONF_FIELD_KEY_ID, default=def_key_id): str,
-                vol.Optional(CONF_FIELD_REFRESH_TOKEN): str,
+                vol.Optional(CONF_FIELD_REFRESH_TOKEN): PASSWORD_SELECTOR,
             }
         )
         return self.async_show_form(
@@ -151,11 +191,7 @@ class AqaraBridgeFlowHandler(ConfigFlow, domain=DOMAIN):
                         self.country_code,
                         resp["result"],
                     )
-                    self.hass.async_create_task(
-                        self.hass.config_entries.flow.async_init(
-                            DOMAIN, context={"source": "get_token"}, data=auth_entry
-                        )
-                    )
+                    return self._finalize_auth(auth_entry)
                 else:
                     errors["base"] = "get_auth_code_error"
             elif CONF_ENTRY_AUTH_ACCOUNT in user_input:
@@ -224,31 +260,53 @@ class OptionsFlowHandler(OptionsFlow):
                 **self.config_entry.data,
                 **self.config_entry.options,
             }
+            # HA options flows pre-fill UI from description={"suggested_value": ...},
+            # NOT from default=. The default kwarg only affects post-submit validation
+            # fallback; it does not render as the visible value in the form. See
+            # https://developers.home-assistant.io/docs/data_entry_flow_index
             config_scheme = vol.Schema(
                 {
                     vol.Required(
                         CONF_FIELD_ACCOUNT,
-                        default=prev_input.get(CONF_ENTRY_AUTH_ACCOUNT, vol.UNDEFINED),
+                        description={
+                            "suggested_value": prev_input.get(CONF_ENTRY_AUTH_ACCOUNT)
+                        },
                     ): str,
                     vol.Required(
                         CONF_FIELD_COUNTRY_CODE,
-                        default=prev_input.get(
-                            SERVER_COUNTRY_CODES_DEFAULT, vol.UNDEFINED
-                        ),
+                        description={
+                            "suggested_value": prev_input.get(
+                                CONF_ENTRY_AUTH_COUNTRY_CODE,
+                                SERVER_COUNTRY_CODES_DEFAULT,
+                            )
+                        },
                     ): vol.In(SERVER_COUNTRY_CODES),
                     vol.Optional(
                         CONF_FIELD_APP_ID,
-                        default=prev_input.get(CONF_ENTRY_APP_ID, vol.UNDEFINED),
+                        description={
+                            "suggested_value": prev_input.get(CONF_ENTRY_APP_ID)
+                        },
                     ): str,
                     vol.Optional(
                         CONF_FIELD_APP_KEY,
-                        default=prev_input.get(CONF_ENTRY_APP_KEY, vol.UNDEFINED),
+                        description={
+                            "suggested_value": prev_input.get(CONF_ENTRY_APP_KEY)
+                        },
                     ): str,
                     vol.Optional(
                         CONF_FIELD_KEY_ID,
-                        default=prev_input.get(CONF_ENTRY_KEY_ID, vol.UNDEFINED),
+                        description={
+                            "suggested_value": prev_input.get(CONF_ENTRY_KEY_ID)
+                        },
                     ): str,
-                    vol.Optional(CONF_FIELD_REFRESH_TOKEN): str,
+                    vol.Optional(
+                        CONF_FIELD_REFRESH_TOKEN,
+                        description={
+                            "suggested_value": prev_input.get(
+                                CONF_ENTRY_AUTH_REFRESH_TOKEN, ""
+                            )
+                        },
+                    ): PASSWORD_SELECTOR,
                 }
             )
             return self.async_show_form(

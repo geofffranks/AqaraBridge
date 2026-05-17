@@ -1,7 +1,8 @@
 {
     "config": {
         "abort": {
-            "complete": "Config Finish."
+            "complete": "Config Finish.",
+            "reauth_successful": "Re-authentication successful."
         },
         "error": {
             "get_auth_code_error": "Get SMS or Email Code Error."

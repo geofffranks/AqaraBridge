@@ -1,7 +1,8 @@
 {
     "config": {
         "abort": {
-            "complete": "配置完成"
+            "complete": "配置完成",
+            "reauth_successful": "重新认证成功"
         },
         "error": {
             "get_auth_code_error": "获取短信验证码异常，请稍后重试"

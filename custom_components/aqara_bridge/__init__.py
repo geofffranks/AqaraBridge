@@ -111,9 +111,15 @@ async def async_setup_entry(hass, entry):
         )
         <= datetime.datetime.now()
     ):
-        resp = aiotcloud.async_refresh_token(data.get(CONF_ENTRY_AUTH_REFRESH_TOKEN))
-        if isinstance(resp, dict) and resp["code"] == 0:
+        aiotcloud.set_country(data.get(CONF_ENTRY_AUTH_COUNTRY_CODE))
+        resp = await aiotcloud.async_refresh_token(
+            data.get(CONF_ENTRY_AUTH_REFRESH_TOKEN)
+        )
+        if isinstance(resp, dict) and resp.get("code") == 0:
             auth_entry = gen_auth_entry(
+                data.get(CONF_ENTRY_APP_ID),
+                data.get(CONF_ENTRY_APP_KEY),
+                data.get(CONF_ENTRY_KEY_ID),
                 data.get(CONF_ENTRY_AUTH_ACCOUNT),
                 data.get(CONF_ENTRY_AUTH_ACCOUNT_TYPE),
                 data.get(CONF_ENTRY_AUTH_COUNTRY_CODE),
@@ -121,8 +127,13 @@ async def async_setup_entry(hass, entry):
             )
             hass.config_entries.async_update_entry(entry, data=auth_entry)
         else:
-            # TODO 这里需要处理刷新令牌失败的情况
-            return False
+            _LOGGER.error(
+                "AqaraBridge: token refresh failed at startup (resp=%s); "
+                "raising ConfigEntryAuthFailed to trigger reauth flow",
+                resp,
+            )
+            from homeassistant.exceptions import ConfigEntryAuthFailed
+            raise ConfigEntryAuthFailed("Aqara token refresh failed")
     else:
         aiotcloud.set_country(data.get(CONF_ENTRY_AUTH_COUNTRY_CODE))
         aiotcloud.access_token = data.get(CONF_ENTRY_AUTH_ACCESS_TOKEN)
